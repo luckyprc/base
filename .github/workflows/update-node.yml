@@ -52,34 +52,8 @@ jobs:
             exit 1
           fi
 
-      - name: Parse nodes
-        run: |
-          python3 -c "
-import base64, re, json
-
-with open('temp/nodes_raw.txt', 'r') as f:
-    content = f.read().strip()
-
-# Decode if base64
-if re.match(r'^[A-Za-z0-9+/]*={0,2}$', content) and len(content) % 4 == 0 and len(content) > 20:
-    try:
-        content = base64.b64decode(content).decode('utf-8', errors='ignore')
-    except: pass
-
-nodes = []
-protocols = ['vmess://', 'vless://', 'ss://', 'ssr://', 'trojan://', 'hysteria://', 'hysteria2://', 'tuic://']
-for line in content.split('\n'):
-    line = line.strip()
-    if line and any(line.startswith(p) for p in protocols):
-        nodes.append(line)
-
-print(f'Parsed {len(nodes)} nodes')
-with open('temp/nodes.json', 'w') as f:
-    json.dump(nodes, f)
-"
-
-      - name: Health Check
-        run: python3 scripts/health_check.py
+      - name: Parse and health check
+        run: python3 scripts/parse_and_check.py
 
       - name: Commit and push
         run: |
