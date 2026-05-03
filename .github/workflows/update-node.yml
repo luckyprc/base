@@ -1,0 +1,410 @@
+name: Daily Aggregate V2Ray Nodes with Health Check
+
+on:
+  schedule:
+    # 每天北京时间 13:05 运行（UTC 05:05）
+    - cron: '5 5 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get dates
+        id: date
+        run: |
+          echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "YESTERDAY=$(date -d 'yesterday' +%Y%m%d 2>/dev/null || date -v-1d +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "TODAY_DASH=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      - name: Create directories
+        run: mkdir -p temp docs
+
+      - name: Fetch Source 1 - comm.cczzuu.top
+        run: |
+          URL="http://comm.cczzuu.top/node/${{ steps.date.outputs.TODAY }}-v2ray.txt"
+          echo "Fetching: $URL"
+          curl -sL --max-time 30 "$URL" -o temp/source1.txt
+          
+          SIZE=$(wc -c < temp/source1.txt | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then
+            echo "Source1 today failed, trying yesterday..."
+            URL="http://comm.cczzuu.top/node/${{ steps.date.outputs.YESTERDAY }}-v2ray.txt"
+            curl -sL --max-time 30 "$URL" -o temp/source1.txt
+          fi
+          
+          SIZE=$(wc -c < temp/source1.txt | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then echo "" > temp/source1.txt; echo "Source1: No data"; else echo "Source1: OK ($SIZE bytes)"; fi
+
+      - name: Fetch Source 2 - v2rayse.com
+        run: |
+          URL="https://v2rayse.com/fs/public/${{ steps.date.outputs.TODAY }}/free-node-share-2000.txt"
+          echo "Fetching: $URL"
+          curl -sL --max-time 30 "$URL" -o temp/source2.txt
+          
+          SIZE=$(wc -c < temp/source2.txt | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then
+            echo "Source2 today failed, trying yesterday..."
+            URL="https://v2rayse.com/fs/public/${{ steps.date.outputs.YESTERDAY }}/free-node-share-2000.txt"
+            curl -sL --max-time 30 "$URL" -o temp/source2.txt
+          fi
+          
+          SIZE=$(wc -c < temp/source2.txt | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then echo "" > temp/source2.txt; echo "Source2: No data"; else echo "Source2: OK ($SIZE bytes)"; fi
+
+      - name: Fetch Source 3 - freeclashnode.com
+        run: |
+          URL="https://node.freeclashnode.com/uploads/2026/05/${{ steps.date.outputs.TODAY }}.json"
+          echo "Fetching: $URL"
+          curl -sL --max-time 30 "$URL" -o temp/source3_raw.json
+          
+          SIZE=$(wc -c < temp/source3_raw.json | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then
+            echo "Source3 today failed, trying yesterday..."
+            URL="https://node.freeclashnode.com/uploads/2026/05/${{ steps.date.outputs.YESTERDAY }}.json"
+            curl -sL --max-time 30 "$URL" -o temp/source3_raw.json
+          fi
+          
+          SIZE=$(wc -c < temp/source3_raw.json | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then
+            echo "" > temp/source3.txt
+            echo "Source3: No data"
+          else
+            python3 << 'PYEOF'
+            import json, base64, sys
+            try:
+                with open('temp/source3_raw.json', 'r') as f:
+                    data = json.load(f)
+                for key in ['data', 'nodes', 'list', 'result', 'subscription', 'content']:
+                    if key in data:
+                        val = data[key]
+                        if isinstance(val, str):
+                            try:
+                                decoded = base64.b64decode(val).decode('utf-8', errors='ignore')
+                                with open('temp/source3.txt', 'w') as f: f.write(decoded)
+                                print("Source3: Extracted from field:", key); sys.exit(0)
+                            except:
+                                with open('temp/source3.txt', 'w') as f: f.write(val)
+                                print("Source3: Extracted string from:", key); sys.exit(0)
+                        elif isinstance(val, list):
+                            nodes = '\n'.join(str(x) for x in val if x)
+                            encoded = base64.b64encode(nodes.encode()).decode()
+                            with open('temp/source3.txt', 'w') as f: f.write(encoded)
+                            print("Source3: Extracted list from:", key); sys.exit(0)
+                if isinstance(data, list):
+                    nodes = '\n'.join(str(x) for x in data if x)
+                    encoded = base64.b64encode(nodes.encode()).decode()
+                    with open('temp/source3.txt', 'w') as f: f.write(encoded)
+                    print("Source3: JSON is array"); sys.exit(0)
+                with open('temp/source3.txt', 'w') as f: f.write(json.dumps(data))
+                print("Source3: Fallback raw JSON")
+            except json.JSONDecodeError:
+                with open('temp/source3_raw.json', 'r') as f: content = f.read().strip()
+                with open('temp/source3.txt', 'w') as f: f.write(content)
+                print("Source3: Not JSON, saved as-is")
+            PYEOF
+          fi
+
+      - name: Fetch Source 4 - Backup static
+        run: |
+          URL="https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt"
+          echo "Fetching: $URL"
+          curl -sL --max-time 30 "$URL" -o temp/source4.txt
+          SIZE=$(wc -c < temp/source4.txt | tr -d ' ')
+          if [ "$SIZE" -lt 100 ]; then echo "" > temp/source4.txt; echo "Source4: No data"; else echo "Source4: OK ($SIZE bytes)"; fi
+
+      - name: Merge and parse all sources
+        run: |
+          python3 << 'PYEOF'
+          import base64, re, json, urllib.parse
+
+          def decode_if_base64(content):
+              content = content.strip()
+              if not content: return ""
+              pattern = re.compile(r'^[A-Za-z0-9+/]*={0,2}$')
+              if pattern.match(content) and len(content) % 4 == 0 and len(content) > 20:
+                  try:
+                      return base64.b64decode(content).decode('utf-8', errors='ignore')
+                  except: pass
+              return content
+
+          def extract_nodes(text):
+              if not text or len(text.strip()) < 10: return []
+              text = decode_if_base64(text)
+              nodes = []
+              protocols = ['vmess://', 'vless://', 'ss://', 'ssr://', 'trojan://', 
+                          'hysteria://', 'hysteria2://', 'tuic://']
+              for line in text.split('\n'):
+                  line = line.strip()
+                  if line and any(line.startswith(p) for p in protocols):
+                      nodes.append(line)
+              return nodes
+
+          all_nodes = []
+          source_stats = {}
+          for i in range(1, 5):
+              try:
+                  with open(f'temp/source{i}.txt', 'r', encoding='utf-8', errors='ignore') as f:
+                      content = f.read()
+                  nodes = extract_nodes(content)
+                  source_stats[f'Source {i}'] = len(nodes)
+                  all_nodes.extend(nodes)
+              except Exception as e:
+                  source_stats[f'Source {i}'] = f'Error: {e}'
+
+          # 去重
+          seen = set()
+          unique_nodes = []
+          for node in all_nodes:
+              if node not in seen:
+                  seen.add(node)
+                  unique_nodes.append(node)
+
+          print("=" * 50)
+          print("Source Statistics:")
+          for src, count in source_stats.items():
+              print(f"  {src}: {count} nodes")
+          print(f"  Total before dedup: {len(all_nodes)}")
+          print(f"  Total after dedup: {len(unique_nodes)}")
+          print("=" * 50)
+
+          # 保存去重后的节点用于健康检测
+          with open('temp/all_nodes.json', 'w') as f:
+              json.dump(unique_nodes, f)
+          
+          print(f"Saved {len(unique_nodes)} nodes for health check")
+          PYEOF
+
+      - name: Health Check - Test node connectivity
+        run: |
+          python3 << 'PYEOF'
+          import json, socket, base64, urllib.parse, re, time, concurrent.futures
+          import subprocess, os
+
+          # 读取节点
+          with open('temp/all_nodes.json', 'r') as f:
+              nodes = json.load(f)
+
+          print(f"Starting health check for {len(nodes)} nodes...")
+
+          def parse_node(node_url):
+              """解析节点 URL，提取地址和端口"""
+              try:
+                  if node_url.startswith('vmess://'):
+                      # vmess://base64(json)
+                      b64 = node_url[8:]
+                      # 补全 padding
+                      padding = 4 - len(b64) % 4
+                      if padding != 4: b64 += '=' * padding
+                      json_str = base64.b64decode(b64).decode('utf-8', errors='ignore')
+                      data = json.loads(json_str)
+                      return data.get('add', ''), int(data.get('port', 0))
+                  
+                  elif node_url.startswith('vless://') or node_url.startswith('trojan://'):
+                      # vless://uuid@host:port?...
+                      # trojan://password@host:port?...
+                      match = re.search(r'://[^@]+@([^:]+):(\d+)', node_url)
+                      if match: return match.group(1), int(match.group(2))
+                  
+                  elif node_url.startswith('ss://'):
+                      # ss://base64(method:password)@host:port
+                      # 或 ss://method:password@host:port
+                      if '@' in node_url:
+                          match = re.search(r'@([^:]+):(\d+)', node_url)
+                          if match: return match.group(1), int(match.group(2))
+                      else:
+                          # base64 编码的整体
+                          b64_part = node_url[5:].split('#')[0].split('?')[0]
+                          padding = 4 - len(b64_part) % 4
+                          if padding != 4: b64_part += '=' * padding
+                          decoded = base64.b64decode(b64_part).decode('utf-8', errors='ignore')
+                          match = re.search(r'@([^:]+):(\d+)', decoded)
+                          if match: return match.group(1), int(match.group(2))
+                  
+                  elif node_url.startswith('ssr://'):
+                      # ssr://base64
+                      b64 = node_url[6:]
+                      padding = 4 - len(b64) % 4
+                      if padding != 4: b64 += '=' * padding
+                      decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
+                      # 格式: server:port:protocol:method:obfs:password_base64/?params
+                      parts = decoded.split(':')
+                      if len(parts) >= 2:
+                          return parts[0], int(parts[1])
+                  
+                  elif node_url.startswith('hysteria://') or node_url.startswith('hysteria2://'):
+                      match = re.search(r'://[^@]*@?([^:]+):(\d+)', node_url)
+                      if match: return match.group(1), int(match.group(2))
+                  
+                  elif node_url.startswith('tuic://'):
+                      match = re.search(r'://[^@]*@?([^:]+):(\d+)', node_url)
+                      if match: return match.group(1), int(match.group(2))
+                      
+              except Exception as e:
+                  pass
+              return None, None
+
+          def test_tcp_connect(host, port, timeout=5):
+              """测试 TCP 连接"""
+              if not host or not port or port <= 0 or port > 65535:
+                  return False, "Invalid host/port"
+              try:
+                  # 跳过本地地址和特殊地址
+                  if host in ('127.0.0.1', 'localhost', '0.0.0.0', '::1'):
+                      return False, "Local address"
+                  if host.startswith('192.168.') or host.startswith('10.') or host.startswith('172.'):
+                      return False, "Private address"
+                  
+                  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  sock.settimeout(timeout)
+                  result = sock.connect_ex((host, port))
+                  sock.close()
+                  if result == 0:
+                      return True, "TCP OK"
+                  return False, f"TCP failed (code {result})"
+              except socket.gaierror:
+                  return False, "DNS resolve failed"
+              except Exception as e:
+                  return False, str(e)
+
+          def test_node(node_url):
+              """测试单个节点"""
+              host, port = parse_node(node_url)
+              if not host:
+                  return node_url, False, "Parse failed", 9999
+              
+              start = time.time()
+              ok, msg = test_tcp_connect(host, port, timeout=5)
+              latency = round((time.time() - start) * 1000, 1)
+              return node_url, ok, msg, latency
+
+          # 并发测试
+          alive_nodes = []
+          dead_nodes = []
+          
+          # 限制并发数，避免被限制
+          max_workers = min(50, len(nodes))
+          
+          with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+              futures = {executor.submit(test_node, node): node for node in nodes}
+              completed = 0
+              for future in concurrent.futures.as_completed(futures):
+                  completed += 1
+                  if completed % 50 == 0:
+                      print(f"  Progress: {completed}/{len(nodes)}...")
+                  try:
+                      node_url, ok, msg, latency = future.result(timeout=10)
+                      if ok:
+                          alive_nodes.append((node_url, latency))
+                      else:
+                          dead_nodes.append((node_url, msg))
+                  except Exception as e:
+                      dead_nodes.append((futures[future], str(e)))
+
+          # 按延迟排序
+          alive_nodes.sort(key=lambda x: x[1])
+
+          print("\n" + "=" * 50)
+          print("Health Check Results:")
+          print(f"  Total nodes: {len(nodes)}")
+          print(f"  Alive: {len(alive_nodes)}")
+          print(f"  Dead: {len(dead_nodes)}")
+          print(f"  Alive rate: {len(alive_nodes)/len(nodes)*100:.1f}%")
+          print("=" * 50)
+
+          # 保存结果
+          alive_urls = [n[0] for n in alive_nodes]
+          
+          # 生成 base64 订阅
+          if alive_urls:
+              merged = '\n'.join(alive_urls)
+              encoded = base64.b64encode(merged.encode('utf-8')).decode('utf-8')
+          else:
+              encoded = ""
+
+          with open('docs/node.txt', 'w') as f:
+              f.write(encoded)
+
+          # 生成明文版本
+          with open('docs/node_plain.txt', 'w') as f:
+              for url, lat in alive_nodes:
+                  f.write(f"[{lat}ms] {url}\n")
+
+          # 生成统计信息
+          stats = {
+              "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "total": len(nodes),
+              "alive": len(alive_nodes),
+              "dead": len(dead_nodes),
+              "alive_rate": round(len(alive_nodes)/len(nodes)*100, 1) if nodes else 0,
+              "alive_nodes": [{"url": n[0][:50] + "...", "latency": n[1]} for n in alive_nodes[:20]],
+              "dead_reasons": {}
+          }
+          # 统计死亡原因
+          for _, reason in dead_nodes:
+              stats["dead_reasons"][reason] = stats["dead_reasons"].get(reason, 0) + 1
+
+          with open('docs/stats.json', 'w') as f:
+              json.dump(stats, f, indent=2)
+
+          print(f"\nOutput files:")
+          print(f"  docs/node.txt ({len(encoded)} bytes base64)")
+          print(f"  docs/node_plain.txt ({len(alive_urls)} alive nodes)")
+          print(f"  docs/stats.json")
+          
+          # 如果存活节点太少，保留昨天的数据
+          if len(alive_urls) < 3 and len(nodes) > 10:
+              print("\nWARNING: Too few alive nodes (< 3), keeping previous data if available...")
+              # GitHub Actions 中这里会保留旧文件，因为上面已经 checkout 了
+          PYEOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          
+          git diff --cached --quiet || {
+            git commit -m "Update nodes for ${{ steps.date.outputs.TODAY }} with health check"
+            git push
+          }
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './docs'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Summary
+        run: |
+          echo "## ✅ 订阅更新完成（含健康检测）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**固定订阅地址：**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/node.txt" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**辅助文件：**" >> $GITHUB_STEP_SUMMARY
+          echo "- 明文节点: \`node_plain.txt\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 统计信息: \`stats.json\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**日期：** ${{ steps.date.outputs.TODAY }}" >> $GITHUB_STEP_SUMMARY
