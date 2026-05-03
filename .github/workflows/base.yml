@@ -1,0 +1,65 @@
+name: Daily Update V2Ray Nodes
+
+on:
+  schedule:
+    # 每天北京时间 13:00 运行（UTC 05:00）
+    - cron: '0 5 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get current date
+        id: date
+        run: |
+          echo "YYYYMMDD=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Download today's node file
+        run: |
+          URL="http://comm.cczzuu.top/node/${{ steps.date.outputs.YYYYMMDD }}-v2ray.txt"
+          echo "Downloading: $URL"
+          
+          # 下载并保存到 docs 目录（用于 Pages）
+          mkdir -p docs
+          curl -sL --max-time 30 "$URL" -o docs/node.txt || {
+            echo "Download failed, keeping previous file if exists"
+            # 如果下载失败且没有旧文件，创建一个空文件
+            [ -f docs/node.txt ] || echo "" > docs/node.txt
+          }
+          
+          # 验证文件大小（防止下载到空文件或错误页面）
+          FILE_SIZE=$(stat -f%z docs/node.txt 2>/dev/null || stat -c%s docs/node.txt 2>/dev/null || echo 0)
+          echo "Downloaded file size: $FILE_SIZE bytes"
+          
+          if [ "$FILE_SIZE" -lt 100 ]; then
+            echo "File too small or empty, keeping previous version"
+            git checkout docs/node.txt 2>/dev/null || true
+          fi
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/node.txt
+          
+          # 只在文件有变化时提交
+          git diff --cached --quiet || {
+            git commit -m "Update nodes for ${{ steps.date.outputs.YYYYMMDD }}"
+            git push
+          }
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './docs'
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
