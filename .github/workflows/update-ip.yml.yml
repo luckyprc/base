@@ -1,0 +1,32 @@
+name: Auto Update CF Best IP
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 每天 UTC 02:00（北京时间 10:00）执行
+  workflow_dispatch:       # 支持手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download CloudflareSpeedTest
+        run: |
+          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/CloudflareSpeedTest_linux_amd64.tar.gz
+          tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
+          chmod +x CloudflareSpeedTest
+      
+      - name: Run Speed Test
+        run: |
+          ./CloudflareSpeedTest -n 200 -t 4 -dn 10 -dt 10 -tp 443 -sl 5 -o result.csv
+          # 提取前 20 个优选 IP，生成 addressesapi.txt
+          awk -F, 'NR>1 && NR<=21 {print $1":443#CF优选"}' result.csv > addressesapi.txt
+      
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add addressesapi.txt
+          git diff --cached --quiet || git commit -m "update: daily best ip $(date +%Y-%m-%d)"
+          git push
