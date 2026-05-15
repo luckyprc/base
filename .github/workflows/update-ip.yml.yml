@@ -13,13 +13,15 @@ jobs:
       
       - name: Download CloudflareSpeedTest
         run: |
-          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/CloudflareSpeedTest_linux_amd64.tar.gz
-          tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
-          chmod +x CloudflareSpeedTest
+          # 注意：新版文件名是 cfst_linux_amd64.tar.gz，不是 CloudflareSpeedTest_linux_amd64.tar.gz
+          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
+          tar -zxf cfst_linux_amd64.tar.gz
+          chmod +x cfst
       
       - name: Run Speed Test
         run: |
-          ./CloudflareSpeedTest -n 200 -t 4 -dn 10 -dt 10 -tp 443 -sl 5 -o result.csv
+          # 新版可执行文件名叫 cfst，不是 CloudflareSpeedTest
+          ./cfst -n 200 -t 4 -dn 10 -dt 10 -tp 443 -sl 5 -o result.csv
           # 提取前 20 个优选 IP，生成 addressesapi.txt
           awk -F, 'NR>1 && NR<=21 {print $1":443#CF优选"}' result.csv > addressesapi.txt
       
