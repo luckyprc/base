@@ -2,33 +2,78 @@ name: Auto Update CF Best IP
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # 每天 UTC 02:00（北京时间 10:00）执行
-  workflow_dispatch:       # 支持手动触发
+    - cron: '0 2 * * *'   # 每天 UTC 02:00，北京时间 10:00 执行
+  workflow_dispatch:       # 支持在 Actions 页面手动触发
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
       - name: Download CloudflareSpeedTest
         run: |
-          # 注意：新版文件名是 cfst_linux_amd64.tar.gz，不是 CloudflareSpeedTest_linux_amd64.tar.gz
-          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
+          wget -q -N https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
           tar -zxf cfst_linux_amd64.tar.gz
           chmod +x cfst
+          echo "CloudflareSpeedTest version:"
+          ./cfst -v || true
       
       - name: Run Speed Test
+        id: speedtest
         run: |
-          # 新版可执行文件名叫 cfst，不是 CloudflareSpeedTest
-          ./cfst -n 200 -t 4 -dn 10 -dt 10 -tp 443 -sl 5 -o result.csv
-          # 提取前 20 个优选 IP，生成 addressesapi.txt
-          awk -F, 'NR>1 && NR<=21 {print $1":443#CF优选"}' result.csv > addressesapi.txt
+          echo "Starting speed test..."
+          # 关键：GitHub Actions 服务器在国外，测国内优选 IP 时下载速度可能不准
+          # 因此去掉 -sl (速度下限)，仅按延迟+下载综合排序，取前 20 个
+          ./cfst -n 200 -t 4 -dn 20 -dt 10 -tp 443 -o result.csv
+          
+          # 检查是否有有效结果
+          if [ ! -f result.csv ] || [ "$(wc -l < result.csv)" -le 1 ]; then
+            echo "result=false" >> $GITHUB_OUTPUT
+            echo "Warning: Speed test returned no valid IPs"
+          else
+            echo "result=true" >> $GITHUB_OUTPUT
+            echo "Speed test completed. Total lines: $(wc -l < result.csv)"
+          fi
+      
+      - name: Generate addressesapi.txt
+        if: steps.speedtest.outputs.result == 'true'
+        run: |
+          # 提取前 20 个结果，格式：IP:端口#备注
+          awk -F, 'NR>1 && NR<=21 {print $1":443#CF优选"}' result.csv > addressesapi.txt.new
+          
+          # 验证新文件是否有效
+          if [ -s addressesapi.txt.new ]; then
+            mv addressesapi.txt.new addressesapi.txt
+            echo "Successfully generated addressesapi.txt:"
+            cat addressesapi.txt
+          else
+            echo "Generated file is empty, keeping old version"
+            rm -f addressesapi.txt.new
+          fi
       
       - name: Commit and Push
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 如果从来没有过这个文件，创建一个占位文件避免 404
+          if [ ! -f addressesapi.txt ]; then
+            echo "# 192.0.2.1:443#placeholder" > addressesapi.txt
+          fi
+          
           git add addressesapi.txt
-          git diff --cached --quiet || git commit -m "update: daily best ip $(date +%Y-%m-%d)"
-          git push
+          
+          # 只在文件有变化时才提交
+          if git diff --cached --quiet; then
+            echo "No changes to commit. IPs are up to date."
+          else
+            git commit -m "auto: update best CF IPs $(date +%Y-%m-%d-%H:%M)"
+            git push
+            echo "Successfully pushed updated IPs"
+          fi
+      
+      - name: Cleanup
+        if: always()
+        run: rm -f result.csv cfst cfst_linux_amd64.tar.gz addressesapi.txt.new
